@@ -379,12 +379,12 @@ typedef void (*bm_midi_warn_f)(const char *msg, void *user);
 
 const char *bm_patchstr(uint16_t patch);
 void        bm_init(bm_state state);
-void        bm_advance(bm_state state, bm_ev_st *events, int events_size);
+void        bm_update(bm_state state, bm_ev_st *events, int events_size);
 void        bm_deviceinit(bm_device_st *device);
 int         bm_devicebytes(bm_device_st *device, const uint8_t *bytes, size_t bytes_size,
 	bm_ev_st *events_out, int max_events_size); // returns number of events written to events_out
 void        bm_midifile(const uint8_t *bytes, size_t bytes_size, bm_midi_event_f f_event,
-	bm_midi_warn_f f_warn);
+	bm_midi_warn_f f_warn, void *user);
 
 // calculates the number of samples that `ticks` represents, using the state's divisor and tempo,
 // along with the samples per second
@@ -394,7 +394,7 @@ static inline int bm_samples(uint16_t divisor, uint32_t tempo, int sample_rate, 
 	// sample rate is samples per second
 	// and ticks is... ticks
 	// samples = ticks * quarternotes/tick * microsecs/quarternote * secs/microsec * samples/sec
-	return (int)((uint64_t)ticks * (uint64_t)tempo * (uint64_t)sample_rate /
+	return (int)(((uint64_t)ticks * (uint64_t)tempo * (uint64_t)sample_rate) /
 		(UINT64_C(1000000) * (uint64_t)divisor));
 }
 
