@@ -1,0 +1,32 @@
+#!/bin/bash
+
+set -e
+
+C_OPTS="-O2 -fwrapv -Werror"
+
+pushd "$(dirname "$0")" > /dev/null
+SCRIPT_DIR="$(pwd)"
+popd > /dev/null
+SRC_DIR=$SCRIPT_DIR/src
+TGT_DIR=$SCRIPT_DIR/tgt
+
+echo Building basicmidi...
+mkdir -p $TGT_DIR
+if which clang > /dev/null; then
+	clang $C_OPTS              \
+		-lm                    \
+		-o $TGT_DIR/basicmidi  \
+		$SRC_DIR/basicmidi.c   \
+		$SRC_DIR/main.c
+else
+	echo ''
+	echo 'ERROR:'
+	echo 'Missing "clang" which is required for building.'
+	echo ''
+	echo 'You can install "clang" by visiting:'
+	echo '   http://llvm.org/'
+	echo ''
+	exit 1
+fi
+
+echo Done
