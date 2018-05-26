@@ -43,7 +43,7 @@ static uint16_t patch_midi[] = {
 	0x3800
 };
 
-const char *bm_patch_str(uint16_t patch){
+const char *bm_patchstr(uint16_t patch){
 	switch (patch){
 		case BM_PATCH_PIANO_ACGR    : return "Acoustic Grand Piano"                  ;
 		case BM_PATCH_PIANO_ACGR_WI : return "Acoustic Grand Piano (wide)"           ;
@@ -301,15 +301,15 @@ const char *bm_patch_str(uint16_t patch){
 		case BM_PATCH_SFX2_G7_MAGU  : return "Machine Gun (GM2)"                     ;
 		case BM_PATCH_SFX2_G7_LAGU  : return "Laser Gun (GM2)"                       ;
 		case BM_PATCH_SFX2_G7_EXPL  : return "Explosion (GM2)"                       ;
-		case BM_PATCH_PERSND_STAN   : return "PSS Standard"                          ;
-		case BM_PATCH_PERSND_ROOM   : return "PSS Room"                              ;
-		case BM_PATCH_PERSND_POWE   : return "PSS Power"                             ;
-		case BM_PATCH_PERSND_ELEC   : return "PSS Electronic"                        ;
-		case BM_PATCH_PERSND_ANLG   : return "PSS Analog"                            ;
-		case BM_PATCH_PERSND_JAZZ   : return "PSS Jazz"                              ;
-		case BM_PATCH_PERSND_BRUS   : return "PSS Brush"                             ;
-		case BM_PATCH_PERSND_ORCH   : return "PSS Orchestra"                         ;
-		case BM_PATCH_PERSND_SNFX   : return "PSS Sound Effects"                     ;
+		case BM_PATCH_PERSND_STAN   : return "Percussion Standard"                   ;
+		case BM_PATCH_PERSND_ROOM   : return "Percussion Room"                       ;
+		case BM_PATCH_PERSND_POWE   : return "Percussion Power"                      ;
+		case BM_PATCH_PERSND_ELEC   : return "Percussion Electronic"                 ;
+		case BM_PATCH_PERSND_ANLG   : return "Percussion Analog"                     ;
+		case BM_PATCH_PERSND_JAZZ   : return "Percussion Jazz"                       ;
+		case BM_PATCH_PERSND_BRUS   : return "Percussion Brush"                      ;
+		case BM_PATCH_PERSND_ORCH   : return "Percussion Orchestra"                  ;
+		case BM_PATCH_PERSND_SNFX   : return "Percussion Sound Effects"              ;
 	}
 	return "Invalid patch";
 }

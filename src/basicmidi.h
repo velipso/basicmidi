@@ -6,9 +6,11 @@
 #define BASICMIDI__H
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 typedef enum {
-	BM_EV_RESET,    // reset all sound and set ticks per quarter-note
+	BM_EV_RESET,    // reset all sound and optionally set ticks per quarter-note
 	BM_EV_TEMPO,    // set microseconds per quarter-note
 	BM_EV_MASTVOL,  // master volume
 	BM_EV_MASTPAN,  // master panning
@@ -322,7 +324,7 @@ typedef struct {
 		} pedaloff;
 		struct {
 			uint8_t channel;  // unsigned 4-bit (0 to 15)
-			uint16_t vol;    // unsigned 14-bit (0 to 16383)
+			uint16_t vol;     // unsigned 14-bit (0 to 16383)
 		} chanvol;
 		struct {
 			uint8_t channel;  // unsigned 4-bit (0 to 15)
@@ -338,11 +340,62 @@ typedef struct {
 		} bend;
 		struct {
 			uint8_t channel;  // unsigned 4-bit (0 to 15)
-			uint8_t mod;      // unsigned 7-bit (0 to 127)
+			uint16_t mod;     // unsigned 14-bit (0 to 16383)
 		} mod;
 	} u;
-} bm_ev_st, *bm_ev;
+} bm_ev_st;
 
-const char *bm_patch_str(uint16_t patch);
+typedef struct {
+	uint16_t divisor;         // set via BM_EV_RESET
+	uint32_t tempo;           // set via BM_EV_TEMPO
+	uint16_t mastvol;         // set via BM_EV_MASTVOL
+	uint16_t mastpan;         // set via BM_EV_MASTPAN
+	struct {
+		uint16_t vol;         // set via BM_EV_CHANVOL
+		int16_t pan;          // set via BM_EV_CHANPAN
+		uint16_t patch;       // set via BM_EV_PATCH
+		int16_t bend;         // set via BM_EV_BEND
+		uint16_t mod;         // set via BM_EV_MOD
+		bool pedals[6];       // set via BM_EV_PEDALON/PEDALOFF
+		struct {
+			bool down;        // set via BM_EV_NOTEON/NOTEOFF
+			uint8_t velocity; // set via BM_EV_NOTEON/NOTEOFF
+		} notes[128];
+	} channels[16];
+} bm_state_st, *bm_state;
+
+typedef struct {
+	// this should be considered private, but it is exposed here to allow for static allocation
+
+} bm_device_st;
+
+typedef struct {
+	int delta;   // number of ticks from previous event
+	bm_ev_st ev; // the new event
+} bm_delta_ev_st;
+
+typedef void (*bm_midi_event_f)(bm_delta_ev_st event, void *user);
+typedef void (*bm_midi_warn_f)(const char *msg, void *user);
+
+const char *bm_patchstr(uint16_t patch);
+void        bm_init(bm_state state);
+void        bm_advance(bm_state state, bm_ev_st *events, int events_size);
+void        bm_deviceinit(bm_device_st *device);
+int         bm_devicebytes(bm_device_st *device, const uint8_t *bytes, size_t bytes_size,
+	bm_ev_st *events_out, int max_events_size); // returns number of events written to events_out
+void        bm_midifile(const uint8_t *bytes, size_t bytes_size, bm_midi_event_f f_event,
+	bm_midi_warn_f f_warn);
+
+// calculates the number of samples that `ticks` represents, using the state's divisor and tempo,
+// along with the samples per second
+static inline int bm_samples(uint16_t divisor, uint32_t tempo, int sample_rate, int ticks){
+	// divisor is ticks per quarter-note
+	// tempo is microseconds per quarter-note
+	// sample rate is samples per second
+	// and ticks is... ticks
+	// samples = ticks * quarternotes/tick * microsecs/quarternote * secs/microsec * samples/sec
+	return (int)((uint64_t)ticks * (uint64_t)tempo * (uint64_t)sample_rate /
+		(UINT64_C(1000000) * (uint64_t)divisor));
+}
 
 #endif // BASICMIDI__H
