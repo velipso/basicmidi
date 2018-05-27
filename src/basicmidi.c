@@ -316,20 +316,79 @@ const char *bm_patchstr(uint16_t patch){
 	return "Invalid patch";
 }
 
-void bm_init(bm_state state){
+static void rest_init(bm_state_st *state){
+	// TODO: initialize the rest
 }
 
-void bm_update(bm_state state, bm_ev_st *events, int events_size){
+void bm_init(bm_state_st *state){
+	state->divisor = 1; // TODO: what is a good default..?
+	rest_init(state);
+}
+
+void bm_update(bm_state_st *state, bm_ev_st *events, int events_size){
+	for (int i = 0; i < events_size; i++){
+		switch (events[i].type){
+			case BM_EV_RESET:
+				if (events[i].u.reset > 0)
+					state->divisor = events[i].u.reset;
+				rest_init(state);
+				break;
+			case BM_EV_TEMPO:
+				state->tempo = events[i].u.tempo;
+				break;
+			case BM_EV_MASTVOL:
+				state->mastvol = events[i].u.mastvol;
+				break;
+			case BM_EV_MASTPAN:
+				state->mastpan = events[i].u.mastpan;
+				break;
+			case BM_EV_NOTEON:
+				state->channels[events[i].u.noteon.channel].notes[events[i].u.noteon.note] =
+					(struct bm_state_note_struct){
+						.down = true,
+						.velocity = events[i].u.noteon.velocity
+					};
+				break;
+			case BM_EV_NOTEOFF:
+				state->channels[events[i].u.noteoff.channel].notes[events[i].u.noteoff.note] =
+					(struct bm_state_note_struct){
+						.down = false,
+						.velocity = 0
+					};
+				break;
+			case BM_EV_PEDALON:
+				state->channels[events[i].u.pedalon.channel].pedals[events[i].u.pedalon.pedal] =
+					true;
+				break;
+			case BM_EV_PEDALOFF:
+				state->channels[events[i].u.pedaloff.channel].pedals[events[i].u.pedaloff.pedal] =
+					false;
+				break;
+			case BM_EV_CHANVOL:
+				state->channels[events[i].u.chanvol.channel].vol = events[i].u.chanvol.vol;
+				break;
+			case BM_EV_CHANPAN:
+				state->channels[events[i].u.chanpan.channel].pan = events[i].u.chanpan.pan;
+				break;
+			case BM_EV_PATCH:
+				state->channels[events[i].u.patch.channel].patch = events[i].u.patch.patch;
+				break;
+			case BM_EV_BEND:
+				state->channels[events[i].u.bend.channel].bend = events[i].u.bend.bend;
+				break;
+			case BM_EV_MOD:
+				state->channels[events[i].u.mod.channel].mod = events[i].u.mod.mod;
+				break;
+		}
+	}
 }
 
 void bm_deviceinit(bm_device_st *device){
 	device->running_status = -1;
 	for (int i = 0; i < 16; i++){
-		device->ctrls[i] = (bm_device_ctrl_st){
-			.bank = i == 9 ? 0x7800 : 0x7900,
-			.vol = 0x3FFF,
-			.pan = 0x2000
-		};
+		device->ctrls[i].bank = i == 9 ? 0x7800 : 0x7900;
+		device->ctrls[i].vol = 0x3FFF;
+		device->ctrls[i].pan = 0x2000;
 	}
 }
 
@@ -348,19 +407,19 @@ static inline const char *ss(int num){
 	return num == 1 ? "" : "s";
 }
 
-static int midi_single(const uint8_t *data, int data_size, int *running_status,
-	bm_device_ctrl_st *ctrls, bm_warn_f f_warn, void *user, bm_ev_st *event_out){
+static int midi_single(const uint8_t *data, int data_size, bm_device_st *device, bm_warn_f f_warn,
+	void *user, bm_ev_st *event_out){
 	// read msg
 	int p = 0;
 	int msg = data[p++];
 	if (msg < 0x80){
 		// use running status
-		if (*running_status < 0){
+		if (device->running_status < 0){
 			warn(f_warn, user, "Invalid message %02X", msg);
 			return p; // consume the bad data
 		}
 		else{
-			msg = *running_status;
+			msg = device->running_status;
 			p--;
 		}
 	}
@@ -371,7 +430,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Note-Off message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		uint8_t note = data[p++];
 		uint8_t vel = data[p++];
 		if (note >= 0x80){
@@ -394,7 +453,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Note-On message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		uint8_t note = data[p++];
 		uint8_t vel = data[p++];
 		if (note >= 0x80){
@@ -426,7 +485,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Note Pressure message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		uint8_t note = data[p++];
 		uint8_t pressure = data[p++];
 		if (note >= 0x80){
@@ -444,7 +503,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Control Change message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		uint8_t ctrl = data[p++];
 		int val = data[p++];
 		if (ctrl >= 0x80){
@@ -458,29 +517,29 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 
 		int chan = msg & 0xF;
 		if (ctrl == 0x00) // Bank Select MSB
-			ctrls[chan].bank = 0x100000 | (val << 8);
+			device->ctrls[chan].bank = 0x100000 | (val << 8);
 		else if (ctrl == 0x20) // Bank Select LSB
-			ctrls[chan].bank = (ctrls[chan].bank & 0xF0FF00) | 0x010000 | val;
+			device->ctrls[chan].bank = (device->ctrls[chan].bank & 0xF0FF00) | 0x010000 | val;
 		else if (ctrl == 0x07 || ctrl == 0x27){ // Channel Volume
 			if (ctrl == 0x07) // MSB
-				ctrls[chan].vol = val << 7;
+				device->ctrls[chan].vol = val << 7;
 			else // LSB
-				ctrls[chan].vol = (ctrls[chan].vol & 0x3F80) | val;
+				device->ctrls[chan].vol = (device->ctrls[chan].vol & 0x3F80) | val;
 			*event_out = (bm_ev_st){
 				.type = BM_EV_CHANVOL,
 				.u.chanvol.channel = chan,
-				.u.chanvol.vol = ctrls[chan].vol
+				.u.chanvol.vol = device->ctrls[chan].vol
 			};
 		}
 		else if (ctrl == 0x0A || ctrl == 0x2A){ // Channel Pan
 			if (ctrl == 0x0A) // MSB
-				ctrls[chan].pan = val << 7;
+				device->ctrls[chan].pan = val << 7;
 			else // LSB
-				ctrls[chan].pan = (ctrls[chan].pan & 0x3F80) | val;
+				device->ctrls[chan].pan = (device->ctrls[chan].pan & 0x3F80) | val;
 			*event_out = (bm_ev_st){
 				.type = BM_EV_CHANPAN,
 				.u.chanpan.channel = chan,
-				.u.chanpan.pan = ctrls[chan].pan - 0x2000
+				.u.chanpan.pan = device->ctrls[chan].pan - 0x2000
 			};
 		}
 		return p;
@@ -490,14 +549,14 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Program Change message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		uint8_t patch = data[p++];
 		if (patch >= 0x80){
 			warn(f_warn, user, "Bad Program Change message (invalid patch %02X)", patch);
 			patch ^= 0x80;
 		}
 		int chan = msg & 0xF;
-		int bank = ctrls[chan].bank;
+		int bank = device->ctrls[chan].bank;
 		if ((bank & 0x110000) != 0x110000)
 			warn(f_warn, user, "Incomplete bank");
 
@@ -529,7 +588,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Channel Pressure message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		uint8_t pressure = data[p++];
 		if (pressure >= 0x80)
 			warn(f_warn, user, "Bad Channel Pressure message (invalid pressure %02X)", pressure);
@@ -540,7 +599,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 			warn(f_warn, user, "Bad Pitch Bend message (out of data)");
 			return data_size;
 		}
-		*running_status = msg;
+		device->running_status = msg;
 		int p1 = data[p++];
 		int p2 = data[p++];
 		if (p1 >= 0x80){
@@ -561,7 +620,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 		return p;
 	}
 	else if (msg == 0xF0 || msg == 0xF7){ // SysEx Event
-		*running_status = -1; // TODO: validate we should clear this
+		device->running_status = -1; // TODO: validate we should clear this
 		// read length as a variable int
 		int dl = 0;
 		int len = 0;
@@ -606,7 +665,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 		return p + dl;
 	}
 	else if (msg == 0xFF){ // Meta Event
-		*running_status = -1; // TODO: validate we should clear this
+		device->running_status = -1; // TODO: validate we should clear this
 		if (p + 1 >= data_size){
 			warn(f_warn, user, "Bad Meta Event (out of data)");
 			return data_size;
@@ -646,7 +705,7 @@ static int midi_single(const uint8_t *data, int data_size, int *running_status,
 		return p + len;
 	}
 
-	*running_status = -1;
+	device->running_status = -1;
 	warn(f_warn, user, "Unknown message type %02X", msg);
 	return 1; // consume the message
 }
@@ -658,7 +717,7 @@ int bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st
 	bm_ev_st ev;
 	while (e < max_events_size && p < size){
 		ev.type = 99; // set event type to something invalid to detect if one is written
-		p += midi_single(data, size, &device->running_status, device->ctrls, f_warn, user, &ev);
+		p += midi_single(data, size, device, f_warn, user, &ev);
 		if ((int)ev.type != 99)
 			events_out[e++] = ev;
 	}
@@ -814,15 +873,13 @@ void bm_readmidi(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_
 					while (true){
 						len++;
 						if (len >= 5){
-							warn(f_warn, user, "Invalid timestamp in track %d",
-								track_i);
+							warn(f_warn, user, "Invalid timestamp in track %d", track_i);
 							goto mtrk_end;
 						}
 						int t = data[p++];
 						if (t & 0x80){
 							if (p >= p_end){
-								warn(f_warn, user, "Invalid timestamp in track %d",
-									track_i);
+								warn(f_warn, user, "Invalid timestamp in track %d", track_i);
 								goto mtrk_end;
 							}
 							dt = (dt << 7) | (t & 0x7F);
@@ -839,8 +896,7 @@ void bm_readmidi(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_
 						// create an event with an invalid type, in order to detect if
 						// midi_single writes out an event
 						bm_delta_ev_st dev = { .delta = dt, .ev = { .type = 99 } };
-						p += midi_single(&data[p], p_end - p, &device.running_status, device.ctrls,
-							f_warn, user, &dev.ev);
+						p += midi_single(&data[p], p_end - p, &device, f_warn, user, &dev.ev);
 						if ((int)dev.ev.type != 99)
 							f_event(dev, user);
 					}

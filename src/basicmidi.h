@@ -357,23 +357,20 @@ typedef struct {
 		int16_t bend;         // set via BM_EV_BEND
 		uint16_t mod;         // set via BM_EV_MOD
 		bool pedals[6];       // set via BM_EV_PEDALON/PEDALOFF
-		struct {
+		struct bm_state_note_struct {
 			bool down;        // set via BM_EV_NOTEON/NOTEOFF
 			uint8_t velocity; // set via BM_EV_NOTEON/NOTEOFF
 		} notes[128];
 	} channels[16];
-} bm_state_st, *bm_state;
+} bm_state_st;
 
 typedef struct {
 	// this should be considered private, but it is exposed here to allow for static allocation
-	uint32_t bank;
-	uint16_t vol;
-	uint16_t pan;
-} bm_device_ctrl_st;
-
-typedef struct {
-	// this should be considered private, but it is exposed here to allow for static allocation
-	bm_device_ctrl_st ctrls[16];
+	struct {
+		uint32_t bank;
+		uint16_t vol;
+		uint16_t pan;
+	} ctrls[16];
 	int running_status;
 } bm_device_st;
 
@@ -388,8 +385,8 @@ typedef size_t (*bm_dump_f)(const void *restrict ptr, size_t size, size_t nitems
 	void *restrict dumpuser);
 
 const char *bm_patchstr(uint16_t patch);
-void bm_init(bm_state state);
-void bm_update(bm_state state, bm_ev_st *events, int events_size);
+void bm_init(bm_state_st *state);
+void bm_update(bm_state_st *state, bm_ev_st *events, int events_size);
 void bm_deviceinit(bm_device_st *device);
 int  bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st *events_out,
 	int max_events_size, bm_warn_f f_warn, void *user);
@@ -407,6 +404,113 @@ static inline int bm_samples(uint16_t divisor, uint32_t tempo, int sample_rate, 
 	// samples = ticks * quarternotes/tick * microsecs/quarternote * secs/microsec * samples/sec
 	return (int)(((uint64_t)ticks * (uint64_t)tempo * (uint64_t)sample_rate) /
 		(UINT64_C(1000000) * (uint64_t)divisor));
+}
+
+// event construction helpers
+
+static inline bm_ev_st bm_ev_reset(int divisor){
+	return (bm_ev_st){
+		.type = BM_EV_RESET,
+		.u.reset = divisor & 0xFFFF
+	};
+}
+
+static inline bm_ev_st bm_ev_tempo(int tempo){
+	return (bm_ev_st){
+		.type = BM_EV_TEMPO,
+		.u.tempo = tempo & 0xFFFFFF
+	};
+}
+
+static inline bm_ev_st bm_ev_mastvol(int mastvol){
+	return (bm_ev_st){
+		.type = BM_EV_MASTVOL,
+		.u.mastvol = mastvol & 0x3FFF
+	};
+}
+
+static inline bm_ev_st bm_ev_mastpan(int mastpan){
+	return (bm_ev_st){
+		.type = BM_EV_MASTPAN,
+		.u.mastpan = ((int16_t)(mastpan << 2)) >> 2
+	};
+}
+
+static inline bm_ev_st bm_ev_noteoff(int channel, int note){
+	return (bm_ev_st){
+		.type = BM_EV_NOTEOFF,
+		.u.noteoff.channel = channel & 0xF,
+		.u.noteoff.note = note & 0x7F
+	};
+}
+
+static inline bm_ev_st bm_ev_noteon(int channel, int note, int velocity){
+	if (velocity <= 0)
+		return bm_ev_noteoff(channel, note);
+	else{
+		return (bm_ev_st){
+			.type = BM_EV_NOTEON,
+			.u.noteon.channel = channel & 0xF,
+			.u.noteon.note = channel & 0x7F,
+			.u.noteon.velocity = velocity & 0x7F
+		};
+	}
+}
+
+static inline bm_ev_st bm_ev_pedalon(int channel, int pedal){
+	return (bm_ev_st){
+		.type = BM_EV_PEDALON,
+		.u.pedalon.channel = channel & 0xF,
+		.u.pedalon.pedal = ((pedal % 6) + 6) % 6
+	};
+}
+
+static inline bm_ev_st bm_ev_pedaloff(int channel, int pedal){
+	return (bm_ev_st){
+		.type = BM_EV_PEDALOFF,
+		.u.pedaloff.channel = channel & 0xF,
+		.u.pedaloff.pedal = ((pedal % 6) + 6) % 6
+	};
+}
+
+static inline bm_ev_st bm_ev_chanvol(int channel, int vol){
+	return (bm_ev_st){
+		.type = BM_EV_CHANVOL,
+		.u.chanvol.channel = channel & 0xF,
+		.u.chanvol.vol = vol & 0x3FFF
+	};
+}
+
+static inline bm_ev_st bm_ev_chanpan(int channel, int pan){
+	return (bm_ev_st){
+		.type = BM_EV_CHANPAN,
+		.u.chanpan.channel = channel & 0xF,
+		.u.chanpan.pan = ((int16_t)(pan << 2)) >> 2
+	};
+}
+
+static inline bm_ev_st bm_ev_patch(int channel, int patch){
+	return (bm_ev_st){
+		.type = BM_EV_PATCH,
+		.u.patch.channel = channel & 0xF,
+		.u.patch.patch = ((patch % 265) + 265) % 265
+	};
+}
+
+static inline bm_ev_st bm_ev_bend(int channel, int bend){
+	return (bm_ev_st){
+		.type = BM_EV_BEND,
+		.u.bend.channel = channel & 0xF,
+		.u.bend.bend = ((int16_t)(bend << 2)) >> 2
+	};
+}
+
+static inline bm_ev_st bm_ev_mod(int channel, int mod){
+	return (bm_ev_st){
+		.type = BM_EV_MOD,
+		.u.mod.channel = channel & 0xF,
+		.u.mod.mod = mod & 0x3FFF
+	};
 }
 
 #endif // BASICMIDI__H
