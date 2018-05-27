@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 typedef enum {
 	BM_EV_RESET,    // reset all sound and optionally set ticks per quarter-note
@@ -383,6 +384,8 @@ typedef struct {
 
 typedef void (*bm_event_f)(bm_delta_ev_st event, void *user);
 typedef void (*bm_warn_f)(const char *msg, void *user);
+typedef size_t (*bm_dump_f)(const void *restrict ptr, size_t size, size_t nitems,
+	void *restrict dumpuser);
 
 const char *bm_patchstr(uint16_t patch);
 void bm_init(bm_state state);
@@ -390,8 +393,9 @@ void bm_update(bm_state state, bm_ev_st *events, int events_size);
 void bm_deviceinit(bm_device_st *device);
 int  bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st *events_out,
 	int max_events_size, bm_warn_f f_warn, void *user);
-void bm_midifile(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_warn,
+void bm_readmidi(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_warn,
 	void *user);
+void bm_writemidi(bm_delta_ev_st *events, int size, bm_dump_f f_dump, void *user);
 
 // calculates the number of samples that `ticks` represents, using the state's divisor and tempo,
 // along with the samples per second

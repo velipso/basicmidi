@@ -714,7 +714,7 @@ static bool read_chunk(int p, int size, const uint8_t *data, chunk_st *chk){
 	return true;
 }
 
-void bm_midifile(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_warn, void *user){
+void bm_readmidi(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_warn, void *user){
 	if (size < 14 ||
 		data[0] != 'M' || data[1] != 'T' || data[2] != 'h' || data[3] != 'd' ||
 		data[4] !=  0  || data[5] !=  0  || data[6] !=  0  || data[7] < 6){
@@ -856,4 +856,8 @@ void bm_midifile(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_
 			"count (%d)", hd_track_ch, track_i);
 	}
 	return;
+}
+
+void bm_writemidi(bm_delta_ev_st *events, int size, bm_dump_f f_dump, void *user){
+	// TODO: this
 }
