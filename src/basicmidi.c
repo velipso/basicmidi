@@ -3,10 +3,12 @@
 // Project Home: https://github.com/voidqk/basicmidi
 
 #include "basicmidi.h"
+#include <stdarg.h>
+#include <stdio.h>
 
 // index < 256 for melody, index >= 256 for percussion
 // 0xQQRR   QQ = Program Change code, RR = Bank code
-static uint16_t patch_midi[] = {
+static uint16_t patch_midi[265] = {
 	0x0000, 0x0001, 0x0002, 0x0100, 0x0101, 0x0200, 0x0201, 0x0300,
 	0x0301, 0x0400, 0x0401, 0x0402, 0x0403, 0x0500, 0x0501, 0x0502,
 	0x0503, 0x0504, 0x0600, 0x0601, 0x0602, 0x0603, 0x0700, 0x0701,
@@ -312,4 +314,546 @@ const char *bm_patchstr(uint16_t patch){
 		case BM_PATCH_PERSND_SNFX   : return "Percussion Sound Effects"              ;
 	}
 	return "Invalid patch";
+}
+
+void bm_init(bm_state state){
+}
+
+void bm_update(bm_state state, bm_ev_st *events, int events_size){
+}
+
+void bm_deviceinit(bm_device_st *device){
+	device->running_status = -1;
+	for (int i = 0; i < 16; i++){
+		device->ctrls[i] = (bm_device_ctrl_st){
+			.bank = i == 9 ? 0x7800 : 0x7900,
+			.vol = 0x3FFF,
+			.pan = 0x2000
+		};
+	}
+}
+
+static void warn(bm_warn_f f_warn, void *user, const char *fmt, ...){
+	if (f_warn == NULL)
+		return;
+	va_list args;
+	va_start(args, fmt);
+	char buf[100];
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	f_warn(buf, user);
+}
+
+static inline const char *ss(int num){
+	return num == 1 ? "" : "s";
+}
+
+static int midi_single(const uint8_t *data, int data_size, int *running_status,
+	bm_device_ctrl_st *ctrls, bm_warn_f f_warn, void *user, bm_ev_st *event_out){
+	// read msg
+	int p = 0;
+	int msg = data[p++];
+	if (msg < 0x80){
+		// use running status
+		if (*running_status < 0){
+			warn(f_warn, user, "Invalid message %02X", msg);
+			return p; // consume the bad data
+		}
+		else{
+			msg = *running_status;
+			p--;
+		}
+	}
+
+	// interpret msg
+	if (msg >= 0x80 && msg < 0x90){ // Note-Off
+		if (p + 1 >= data_size){
+			warn(f_warn, user, "Bad Note-Off message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		uint8_t note = data[p++];
+		uint8_t vel = data[p++];
+		if (note >= 0x80){
+			warn(f_warn, user, "Bad Note-Off message (invalid note %02X)", note);
+			note ^= 0x80;
+		}
+		if (vel >= 0x80){
+			warn(f_warn, user, "Bad Note-Off message (invalid velocity %02X)", vel);
+			vel ^= 0x80;
+		}
+		*event_out = (bm_ev_st){
+			.type = BM_EV_NOTEOFF,
+			.u.noteoff.channel = msg & 0x0F,
+			.u.noteoff.note = note
+		};
+		return p;
+	}
+	else if (msg >= 0x90 && msg < 0xA0){ // Note On
+		if (p + 1 >= data_size){
+			warn(f_warn, user, "Bad Note-On message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		uint8_t note = data[p++];
+		uint8_t vel = data[p++];
+		if (note >= 0x80){
+			warn(f_warn, user, "Bad Note-On message (invalid note %02X)", note);
+			note ^= 0x80;
+		}
+		if (vel >= 0x80){
+			warn(f_warn, user, "Bad Note-On message (invalid velocity %02X)", vel);
+			vel ^= 0x80;
+		}
+		if (vel == 0){
+			*event_out = (bm_ev_st){
+				.type = BM_EV_NOTEOFF,
+				.u.noteoff.channel = msg & 0x0F,
+				.u.noteoff.note = note
+			};
+			return p;
+		}
+		*event_out = (bm_ev_st){
+			.type = BM_EV_NOTEON,
+			.u.noteon.channel = msg & 0x0F,
+			.u.noteon.note = note,
+			.u.noteon.velocity = vel
+		};
+		return p;
+	}
+	else if (msg >= 0xA0 && msg < 0xB0){ // Note Pressure
+		if (p + 1 >= data_size){
+			warn(f_warn, user, "Bad Note Pressure message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		uint8_t note = data[p++];
+		uint8_t pressure = data[p++];
+		if (note >= 0x80){
+			warn(f_warn, user, "Bad Note Pressure message (invalid note %02X)", note);
+			note ^= 0x80;
+		}
+		if (pressure >= 0x80){
+			warn(f_warn, user, "Bad Note Pressure message (invalid pressure %02X)", pressure);
+			pressure ^= 0x80;
+		}
+		return p;
+	}
+	else if (msg >= 0xB0 && msg < 0xC0){ // Control Change
+		if (p + 1 >= data_size){
+			warn(f_warn, user, "Bad Control Change message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		uint8_t ctrl = data[p++];
+		int val = data[p++];
+		if (ctrl >= 0x80){
+			warn(f_warn, user, "Bad Control Change message (invalid control %02X)", ctrl);
+			ctrl ^= 0x80;
+		}
+		if (val >= 0x80){
+			warn(f_warn, user, "Bad Control Change message (invalid value %02X)", val);
+			val ^= 0x80;
+		}
+
+		int chan = msg & 0xF;
+		if (ctrl == 0x00) // Bank Select MSB
+			ctrls[chan].bank = 0x100000 | (val << 8);
+		else if (ctrl == 0x20) // Bank Select LSB
+			ctrls[chan].bank = (ctrls[chan].bank & 0xF0FF00) | 0x010000 | val;
+		else if (ctrl == 0x07 || ctrl == 0x27){ // Channel Volume
+			if (ctrl == 0x07) // MSB
+				ctrls[chan].vol = val << 7;
+			else // LSB
+				ctrls[chan].vol = (ctrls[chan].vol & 0x3F80) | val;
+			*event_out = (bm_ev_st){
+				.type = BM_EV_CHANVOL,
+				.u.chanvol.channel = chan,
+				.u.chanvol.vol = ctrls[chan].vol
+			};
+		}
+		else if (ctrl == 0x0A || ctrl == 0x2A){ // Channel Pan
+			if (ctrl == 0x0A) // MSB
+				ctrls[chan].pan = val << 7;
+			else // LSB
+				ctrls[chan].pan = (ctrls[chan].pan & 0x3F80) | val;
+			*event_out = (bm_ev_st){
+				.type = BM_EV_CHANPAN,
+				.u.chanpan.channel = chan,
+				.u.chanpan.pan = ctrls[chan].pan - 0x2000
+			};
+		}
+		return p;
+	}
+	else if (msg >= 0xC0 && msg < 0xD0){ // Program Change
+		if (p >= data_size){
+			warn(f_warn, user, "Bad Program Change message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		uint8_t patch = data[p++];
+		if (patch >= 0x80){
+			warn(f_warn, user, "Bad Program Change message (invalid patch %02X)", patch);
+			patch ^= 0x80;
+		}
+		int chan = msg & 0xF;
+		int bank = ctrls[chan].bank;
+		if ((bank & 0x110000) != 0x110000)
+			warn(f_warn, user, "Incomplete bank");
+
+		bool melody = (bank & 0xFF00) == 0x7900;
+		bool percussion = (bank & 0xFF00) == 0x7800;
+		if (melody || percussion){
+			// calculate patch based on format of patch_midi
+			patch = (patch << 8) | (bank & 0xFF);
+			int start = melody ? 0 : 256;
+			int end = melody ? 256 : 265;
+			for (int i = start; i < end; i++){
+				if (patch_midi[i] == patch){
+					*event_out = (bm_ev_st){
+						.type = BM_EV_PATCH,
+						.u.patch.channel = chan,
+						.u.patch.patch = i
+					};
+					return p;
+				}
+			}
+			warn(f_warn, user, "Unknown patch %02X for bank %04X", patch, bank);
+		}
+		else
+			warn(f_warn, user, "Unknown bank %04X", bank);
+		return p;
+	}
+	else if (msg >= 0xD0 && msg < 0xE0){ // Channel Pressure
+		if (p >= data_size){
+			warn(f_warn, user, "Bad Channel Pressure message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		uint8_t pressure = data[p++];
+		if (pressure >= 0x80)
+			warn(f_warn, user, "Bad Channel Pressure message (invalid pressure %02X)", pressure);
+		return p;
+	}
+	else if (msg >= 0xE0 && msg < 0xF0){ // Pitch Bend
+		if (p + 1 >= data_size){
+			warn(f_warn, user, "Bad Pitch Bend message (out of data)");
+			return data_size;
+		}
+		*running_status = msg;
+		int p1 = data[p++];
+		int p2 = data[p++];
+		if (p1 >= 0x80){
+			warn(f_warn, user, "Bad Pitch Bend message (invalid lower bits %02X)", p1);
+			p1 ^= 0x80;
+		}
+		if (p2 >= 0x80){
+			warn(f_warn, user, "Bad Pitch Bend message (invalid higher bits %02X)", p2);
+			p2 ^= 0x80;
+		}
+		int chan = msg & 0xF;
+		int bend = p1 | (p2 << 7);
+		*event_out = (bm_ev_st){
+			.type = BM_EV_BEND,
+			.u.bend.channel = chan,
+			.u.bend.bend = bend - 0x1000
+		};
+		return p;
+	}
+	else if (msg == 0xF0 || msg == 0xF7){ // SysEx Event
+		*running_status = -1; // TODO: validate we should clear this
+		// read length as a variable int
+		int dl = 0;
+		int len = 0;
+		while (true){
+			if (p >= data_size){
+				warn(f_warn, user, "Bad SysEx Event (out of data)");
+				return data_size;
+			}
+			len++;
+			if (len >= 5){
+				warn(f_warn, user, "Bad SysEx Event (invalid data length)");
+				return 1; // consume the message
+			}
+			int t = data[p++];
+			dl = (dl << 7) | (t & 0x7F);
+			if ((t & 0x80) == 0)
+				break;
+		}
+		if (p + dl > data_size){
+			warn(f_warn, user, "Bad SysEx Event (data length too large)");
+			return data_size;
+		}
+		if (dl == 7 &&
+			data[p + 0] == 0x7F &&
+			data[p + 2] == 0x04 &&
+			data[p + 7] == 0xF7){ // SysEx Real Time Device Control
+			if (data[p + 3] == 0x01){ // Master Volume
+				int v = (((int)(data[p + 5] & 0x7F)) << 7) | (data[p + 4] & 0x7F);
+				*event_out = (bm_ev_st){
+					.type = BM_EV_MASTVOL,
+					.u.mastvol = v
+				};
+			}
+			else if (data[p + 3] == 0x02){ // Master Balance
+				int v = (((int)(data[p + 5] & 0x7F)) << 7) | (data[p + 4] & 0x7F);
+				*event_out = (bm_ev_st){
+					.type = BM_EV_MASTPAN,
+					.u.mastpan = v - 0x1000
+				};
+			}
+		}
+		return p + dl;
+	}
+	else if (msg == 0xFF){ // Meta Event
+		*running_status = -1; // TODO: validate we should clear this
+		if (p + 1 >= data_size){
+			warn(f_warn, user, "Bad Meta Event (out of data)");
+			return data_size;
+		}
+		int type = data[p++];
+		int len = data[p++];
+		if (p + len > data_size){
+			warn(f_warn, user, "Bad Meta Event (data length too large)");
+			return data_size;
+		}
+		if (type == 0x2F){ // 00  End of Track
+			if (len != 0)
+				warn(f_warn, user, "Expecting zero-length data for End of Track message");
+			if (p < data_size){
+				uint64_t pd = data_size - p;
+				warn(f_warn, user, "Extra data at end of track: %llu byte%s", pd, ss(pd));
+			}
+			return data_size;
+		}
+		else if (type == 0x51){ // 03 TT TT TT  Set Tempo
+			if (len < 3)
+				warn(f_warn, user, "Missing data for Set Tempo event");
+			else{
+				if (len > 3)
+					warn(f_warn, user, "Extra %d byte%s for Set Tempo event", len - 3, ss(len - 3));
+				int tempo = ((int)data[p + 0] << 16) | ((int)data[p + 1] << 8) | data[p + 2];
+				if (tempo == 0)
+					warn(f_warn, user, "Invalid tempo (0)");
+				else{
+					*event_out = (bm_ev_st){
+						.type = BM_EV_TEMPO,
+						.u.tempo = tempo
+					};
+				}
+			}
+		}
+		return p + len;
+	}
+
+	*running_status = -1;
+	warn(f_warn, user, "Unknown message type %02X", msg);
+	return 1; // consume the message
+}
+
+int bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st *events_out,
+	int max_events_size, bm_warn_f f_warn, void *user){
+	int e = 0;
+	int p = 0;
+	bm_ev_st ev;
+	while (e < max_events_size && p < size){
+		ev.type = 99; // set event type to something invalid to detect if one is written
+		p += midi_single(data, size, &device->running_status, device->ctrls, f_warn, user, &ev);
+		if ((int)ev.type != 99)
+			events_out[e++] = ev;
+	}
+	return e;
+}
+
+typedef struct {
+	int type;
+	int data_size;
+	int data_start;
+	int alignment;
+} chunk_st;
+
+static inline int chunk_type(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4){
+	if (b1 == 'M' && b2 == 'T'){
+		if (b3 == 'h' && b4 == 'd')
+			return 0; // header
+		else if (b3 == 'r' && b4 == 'k')
+			return 1; // track
+	}
+	return -1; // invalid
+}
+
+static bool read_chunk(int p, int size, const uint8_t *data, chunk_st *chk){
+	if (p + 8 > size)
+		return false;
+	int type = chunk_type(data[p + 0], data[p + 1], data[p + 2], data[p + 3]);
+	int alignment = 0;
+	if (type < 0){
+		int p_orig = p;
+		// rewind 7 bytes and search forward until end of data
+		p = p < 7 ? 0 : p - 7;
+		while (p + 4 <= size){
+			type = chunk_type(data[p + 0], data[p + 1], data[p + 2], data[p + 3]);
+			if (type >= 0)
+				break;
+			p++;
+		}
+		if (type >= 0)
+			alignment = p - p_orig;
+	}
+	if (type < 0 || p + 8 > size)
+		return false;
+	if (data[p + 4] > 0) // if size is claiming something more than 16 megs, just bail
+		return false;
+	chk->type = type;
+	chk->data_size =
+		((int)data[p + 5] << 16) |
+		((int)data[p + 6] <<  8) |
+		((int)data[p + 7]);
+	chk->data_start = p + 8;
+	chk->alignment = alignment;
+	return true;
+}
+
+void bm_midifile(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_warn, void *user){
+	if (size < 14 ||
+		data[0] != 'M' || data[1] != 'T' || data[2] != 'h' || data[3] != 'd' ||
+		data[4] !=  0  || data[5] !=  0  || data[6] !=  0  || data[7] < 6){
+		warn(f_warn, user, "Invalid header");
+		return;
+	}
+	int pos = 0;
+	bool found_header = false;
+	int hd_format;
+	int hd_track_ch;
+	int track_i = 0;
+	bm_device_st device;
+	chunk_st chk;
+	while (pos < size){
+		if (!read_chunk(pos, size, data, &chk)){
+			if (!found_header)
+				warn(f_warn, user, "Invalid header");
+			else{
+				int dif = size - pos;
+				warn(f_warn, user, "Unrecognized data (%d byte%s) at end of file", dif, ss(dif));
+			}
+			return;
+		}
+		if (chk.alignment != 0)
+			warn(f_warn, user, "Chunk misaligned by %d byte%s", chk.alignment, ss(chk.alignment));
+		int orig_size = chk.data_size;
+		if (chk.data_start + chk.data_size > size){
+			int offset = chk.data_start + chk.data_size - size;
+			warn(f_warn, user, "Chunk ends %d byte%s too early", offset, ss(offset));
+			chk.data_size -= offset;
+		}
+		pos = chk.data_start + chk.data_size;
+		switch (chk.type){
+			case 0: { // MThd
+				if (found_header)
+					warn(f_warn, user, "Multiple header chunks present");
+				found_header = true;
+				if (orig_size != 6){
+					warn(f_warn, user,
+						"Header chunk has non-standard size %d byte%s (expecting 6 bytes)",
+						orig_size, ss(orig_size));
+				}
+				if (chk.data_size >= 2){
+					hd_format = ((int)data[chk.data_start + 0] << 8) | data[chk.data_start + 1];
+					if (hd_format != 0 && hd_format != 1 && hd_format != 2){
+						warn(f_warn, user, "Header reports bad format (%d)", hd_format);
+						hd_format = 1;
+					}
+				}
+				else{
+					warn(f_warn, user, "Header missing format");
+					hd_format = 1;
+				}
+				if (chk.data_size >= 4){
+					hd_track_ch = ((int)data[chk.data_start + 2] << 8) | data[chk.data_start + 3];
+					if (hd_format == 0 && hd_track_ch != 1){
+						warn(f_warn, user,
+							"Format 0 expecting 1 track chunk, header is reporting %d chunks",
+							hd_track_ch);
+					}
+				}
+				else{
+					warn(f_warn, user, "Header missing track chunk count");
+					hd_track_ch = -1;
+				}
+				int division = 1;
+				if (chk.data_size >= 6){
+					division = ((int)data[chk.data_start + 4] << 8) | data[chk.data_start + 5];
+					if (division & 0x8000){
+						warn(f_warn, user, "Unsupported timing format (SMPTE)");
+						division = 1;
+					}
+				}
+				else
+					warn(f_warn, user, "Header missing division");
+				f_event((bm_delta_ev_st){
+					.delta = 0,
+					.ev = (bm_ev_st){
+						.type = BM_EV_RESET,
+						.u.reset = division
+					}
+				}, user);
+			} break;
+
+			case 1: { // MTrk
+				if (hd_format == 0 && track_i > 0){
+					warn(f_warn, user, "Format 0 expecting 1 track chunk, found more than one");
+					hd_format = 1;
+				}
+				bm_deviceinit(&device);
+				int p = chk.data_start;
+				int p_end = chk.data_start + chk.data_size;
+				while (p < p_end){
+					// read delta as variable int
+					int dt = 0;
+					int len = 0;
+					while (true){
+						len++;
+						if (len >= 5){
+							warn(f_warn, user, "Invalid timestamp in track %d",
+								track_i);
+							goto mtrk_end;
+						}
+						int t = data[p++];
+						if (t & 0x80){
+							if (p >= p_end){
+								warn(f_warn, user, "Invalid timestamp in track %d",
+									track_i);
+								goto mtrk_end;
+							}
+							dt = (dt << 7) | (t & 0x7F);
+						}
+						else{
+							dt = (dt << 7) | t;
+							break;
+						}
+					}
+
+					if (p >= p_end)
+						warn(f_warn, user, "Missing message");
+					else{
+						// create an event with an invalid type, in order to detect if
+						// midi_single writes out an event
+						bm_delta_ev_st dev = { .delta = dt, .ev = { .type = 99 } };
+						p += midi_single(&data[p], p_end - p, &device.running_status, device.ctrls,
+							f_warn, user, &dev.ev);
+						if ((int)dev.ev.type != 99)
+							f_event(dev, user);
+					}
+				}
+				warn(f_warn, user, "Track %d ended before receiving End of Track message", track_i);
+				mtrk_end:
+				track_i++;
+			} break;
+		}
+	}
+	if (found_header && hd_track_ch != track_i){
+		warn(f_warn, user, "Mismatch between reported track count (%d) and actual track "
+			"count (%d)", hd_track_ch, track_i);
+	}
+	return;
 }

@@ -7,7 +7,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <stdlib.h>
 
 typedef enum {
 	BM_EV_RESET,    // reset all sound and optionally set ticks per quarter-note
@@ -301,7 +300,7 @@ typedef enum {
 typedef struct {
 	bm_ev_type type;
 	union {
-		uint16_t reset;       // unsigned 16-bit (0 to 65535), ticks per quarter-note
+		uint16_t reset;       // unsigned 16-bit (0 to 65535), divisor, ticks per quarter-note
 		uint32_t tempo;       // unsigned 24-bit (0 to 16777215), microseconds per quarter-note
 		uint16_t mastvol;     // unsigned 14-bit (0 to 16383)
 		int16_t mastpan;      // signed 14-bit (-8192 [left] to 8191 [right])
@@ -366,7 +365,15 @@ typedef struct {
 
 typedef struct {
 	// this should be considered private, but it is exposed here to allow for static allocation
+	uint32_t bank;
+	uint16_t vol;
+	uint16_t pan;
+} bm_device_ctrl_st;
 
+typedef struct {
+	// this should be considered private, but it is exposed here to allow for static allocation
+	bm_device_ctrl_st ctrls[16];
+	int running_status;
 } bm_device_st;
 
 typedef struct {
@@ -374,17 +381,17 @@ typedef struct {
 	bm_ev_st ev; // the new event
 } bm_delta_ev_st;
 
-typedef void (*bm_midi_event_f)(bm_delta_ev_st event, void *user);
-typedef void (*bm_midi_warn_f)(const char *msg, void *user);
+typedef void (*bm_event_f)(bm_delta_ev_st event, void *user);
+typedef void (*bm_warn_f)(const char *msg, void *user);
 
 const char *bm_patchstr(uint16_t patch);
-void        bm_init(bm_state state);
-void        bm_update(bm_state state, bm_ev_st *events, int events_size);
-void        bm_deviceinit(bm_device_st *device);
-int         bm_devicebytes(bm_device_st *device, const uint8_t *bytes, size_t bytes_size,
-	bm_ev_st *events_out, int max_events_size); // returns number of events written to events_out
-void        bm_midifile(const uint8_t *bytes, size_t bytes_size, bm_midi_event_f f_event,
-	bm_midi_warn_f f_warn, void *user);
+void bm_init(bm_state state);
+void bm_update(bm_state state, bm_ev_st *events, int events_size);
+void bm_deviceinit(bm_device_st *device);
+int  bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st *events_out,
+	int max_events_size, bm_warn_f f_warn, void *user);
+void bm_midifile(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_warn,
+	void *user);
 
 // calculates the number of samples that `ticks` represents, using the state's divisor and tempo,
 // along with the samples per second
