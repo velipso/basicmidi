@@ -122,6 +122,7 @@ int main(int argc, char **argv){
 	if (fread(data, 1, size, fp) != size){
 		fprintf(stderr, "Failed to read all of file\n");
 		fclose(fp);
+		free(data);
 		return 1;
 	}
 	fclose(fp);
@@ -129,5 +130,6 @@ int main(int argc, char **argv){
 	// process file
 	bm_readmidi(data, size, onevent, onwarn, NULL);
 
+	free(data);
 	return 0;
 }
