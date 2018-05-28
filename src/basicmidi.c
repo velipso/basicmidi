@@ -316,12 +316,27 @@ const char *bm_patchstr(uint16_t patch){
 	return "Invalid patch";
 }
 
-static void rest_init(bm_state_st *state){
-	// TODO: initialize the rest
+static inline void rest_init(bm_state_st *state){
+	state->tempo = 500000; // 2 quarternotes per second, or 120 beats per minute
+	state->mastvol = 16383;
+	state->mastpan = 0;
+	for (int i = 0; i < 16; i++){
+		state->channels[i].vol = 16383;
+		state->channels[i].pan = 0;
+		state->channels[i].patch = i == 9 ? BM_PATCH_PERSND_STAN : 0;
+		state->channels[i].bend = 0;
+		state->channels[i].mod = 0;
+		for (int p = 0; p < 6; p++)
+			state->channels[i].pedals[p] = false;
+		for (int n = 0; n < 128; n++){
+			state->channels[i].notes[n].down = false;
+			state->channels[i].notes[n].velocity = 0;
+		}
+	}
 }
 
 void bm_init(bm_state_st *state){
-	state->divisor = 1; // TODO: what is a good default..?
+	state->divisor = 1;
 	rest_init(state);
 }
 
