@@ -386,7 +386,7 @@ void bm_update(bm_state_st *state, bm_ev_st *events, int events_size){
 void bm_deviceinit(bm_device_st *device){
 	device->running_status = -1;
 	for (int i = 0; i < 16; i++){
-		device->ctrls[i].bank = i == 9 ? 0x7800 : 0x7900;
+		device->ctrls[i].bank = i == 9 ? 0x117800 : 0x117900;
 		device->ctrls[i].vol = 0x3FFF;
 		device->ctrls[i].pan = 0x2000;
 	}
@@ -408,7 +408,7 @@ static inline const char *ss(int num){
 }
 
 static int midi_single(const uint8_t *data, int data_size, bm_device_st *device, bm_warn_f f_warn,
-	void *user, bm_ev_st *event_out){
+	void *user, bm_ev_st *event_out, bool *end_of_track){
 	// read msg
 	int p = 0;
 	int msg = data[p++];
@@ -550,7 +550,7 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			return data_size;
 		}
 		device->running_status = msg;
-		uint8_t patch = data[p++];
+		int patch = data[p++];
 		if (patch >= 0x80){
 			warn(f_warn, user, "Bad Program Change message (invalid patch %02X)", patch);
 			patch ^= 0x80;
@@ -561,6 +561,10 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			warn(f_warn, user, "Incomplete bank");
 
 		bool melody = (bank & 0xFF00) == 0x7900;
+		if ((bank & 0xFFFF) == 0){
+			warn(f_warn, user, "Empty bank; assuming GM1 melody");
+			melody = true;
+		}
 		bool percussion = (bank & 0xFF00) == 0x7800;
 		if (melody || percussion){
 			// calculate patch based on format of patch_midi
@@ -580,7 +584,7 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			warn(f_warn, user, "Unknown patch %02X for bank %04X", patch, bank);
 		}
 		else
-			warn(f_warn, user, "Unknown bank %04X", bank);
+			warn(f_warn, user, "Unknown bank %04X for patch %02X", bank, patch);
 		return p;
 	}
 	else if (msg >= 0xD0 && msg < 0xE0){ // Channel Pressure
@@ -683,6 +687,8 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 				uint64_t pd = data_size - p;
 				warn(f_warn, user, "Extra data at end of track: %llu byte%s", pd, ss(pd));
 			}
+			if (end_of_track)
+				*end_of_track = true;
 			return data_size;
 		}
 		else if (type == 0x51){ // 03 TT TT TT  Set Tempo
@@ -717,7 +723,7 @@ int bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st
 	bm_ev_st ev;
 	while (e < max_events_size && p < size){
 		ev.type = 99; // set event type to something invalid to detect if one is written
-		p += midi_single(data, size, device, f_warn, user, &ev);
+		p += midi_single(data, size, device, f_warn, user, &ev, NULL);
 		if ((int)ev.type != 99)
 			events_out[e++] = ev;
 	}
@@ -725,10 +731,11 @@ int bm_devicebytes(bm_device_st *device, const uint8_t *data, int size, bm_ev_st
 }
 
 typedef struct {
+	bm_device_st device;
 	int type;
-	int data_size;
-	int data_start;
-	int alignment;
+	int start;
+	int end;
+	int dt;
 } chunk_st;
 
 static inline int chunk_type(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4){
@@ -741,11 +748,11 @@ static inline int chunk_type(uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4){
 	return -1; // invalid
 }
 
-static bool read_chunk(int p, int size, const uint8_t *data, chunk_st *chk){
+static bool read_chunk(int p, int size, const uint8_t *data, chunk_st *chk, int *alignment){
 	if (p + 8 > size)
 		return false;
 	int type = chunk_type(data[p + 0], data[p + 1], data[p + 2], data[p + 3]);
-	int alignment = 0;
+	*alignment = 0;
 	if (type < 0){
 		int p_orig = p;
 		// rewind 7 bytes and search forward until end of data
@@ -757,19 +764,49 @@ static bool read_chunk(int p, int size, const uint8_t *data, chunk_st *chk){
 			p++;
 		}
 		if (type >= 0)
-			alignment = p - p_orig;
+			*alignment = p - p_orig;
 	}
 	if (type < 0 || p + 8 > size)
 		return false;
 	if (data[p + 4] > 0) // if size is claiming something more than 16 megs, just bail
 		return false;
 	chk->type = type;
-	chk->data_size =
+	chk->start = p + 8;
+	chk->end = chk->start + (
 		((int)data[p + 5] << 16) |
 		((int)data[p + 6] <<  8) |
-		((int)data[p + 7]);
-	chk->data_start = p + 8;
-	chk->alignment = alignment;
+		((int)data[p + 7])
+	);
+	return true;
+}
+
+static inline bool read_dt(chunk_st *chunk, const uint8_t *data, int track_i, bm_warn_f f_warn,
+	void *user){
+	if (chunk->start >= chunk->end)
+		return false;
+	// read delta as variable int
+	int dt = 0;
+	int len = 0;
+	while (true){
+		len++;
+		if (len >= 5){
+			warn(f_warn, user, "Invalid timestamp in track %d", track_i);
+			return false;
+		}
+		int t = data[chunk->start++];
+		if (t & 0x80){
+			if (chunk->start >= chunk->end){
+				warn(f_warn, user, "Invalid timestamp in track %d", track_i);
+				return false;
+			}
+			dt = (dt << 7) | (t & 0x7F);
+		}
+		else{
+			dt = (dt << 7) | t;
+			break;
+		}
+	}
+	chunk->dt = dt;
 	return true;
 }
 
@@ -780,138 +817,195 @@ void bm_readmidi(const uint8_t *data, int size, bm_event_f f_event, bm_warn_f f_
 		warn(f_warn, user, "Invalid header");
 		return;
 	}
-	int pos = 0;
-	bool found_header = false;
-	int hd_format;
-	int hd_track_ch;
-	int track_i = 0;
-	bm_device_st device;
-	chunk_st chk;
-	while (pos < size){
-		if (!read_chunk(pos, size, data, &chk)){
-			if (!found_header)
-				warn(f_warn, user, "Invalid header");
-			else{
+
+	// read in all the chunk locations
+	chunk_st chunks[300]; // max number of chunks seen in the wild is 254
+	int chunks_size = 0;
+	{
+		int pos = 0;
+		chunk_st chk;
+		while (pos < size && chunks_size < 300){
+			int alignment = 0;
+			if (!read_chunk(pos, size, data, &chk, &alignment)){
 				int dif = size - pos;
-				warn(f_warn, user, "Unrecognized data (%d byte%s) at end of file", dif, ss(dif));
+				if (dif > 0){
+					warn(f_warn, user, "Unrecognized data (%d byte%s) at end of file",
+						dif, ss(dif));
+				}
+				break;
 			}
-			return;
+			if (alignment != 0)
+				warn(f_warn, user, "Chunk misaligned by %d byte%s", alignment, ss(alignment));
+			int chk_size = chk.end - chk.start;
+			if (chk.type == 0 && chk_size != 6){
+				warn(f_warn, user,
+					"Header chunk has non-standard size %d byte%s (expecting 6 bytes)",
+					chk_size, ss(chk_size));
+			}
+			if (chk.end > size){
+				int offset = chk.end - size;
+				chk.end = size;
+				warn(f_warn, user, "Chunk ends %d byte%s too early", offset, ss(offset));
+			}
+			pos = chk.end;
+			chunks[chunks_size++] = chk;
 		}
-		if (chk.alignment != 0)
-			warn(f_warn, user, "Chunk misaligned by %d byte%s", chk.alignment, ss(chk.alignment));
-		int orig_size = chk.data_size;
-		if (chk.data_start + chk.data_size > size){
-			int offset = chk.data_start + chk.data_size - size;
-			warn(f_warn, user, "Chunk ends %d byte%s too early", offset, ss(offset));
-			chk.data_size -= offset;
-		}
-		pos = chk.data_start + chk.data_size;
-		switch (chk.type){
-			case 0: { // MThd
-				if (found_header)
-					warn(f_warn, user, "Multiple header chunks present");
-				found_header = true;
-				if (orig_size != 6){
+	}
+
+	// the first chunk *must* be a MThd, since we validated that at the start
+	int ch = 0;
+	bool found_header = false;
+	while (ch < chunks_size){
+		// decode the header
+		int hd_format = 1;
+		int hd_tracks = -1;
+		{
+			chunk_st chk = chunks[ch++];
+			int chk_size = chk.end - chk.start;
+			if (found_header)
+				warn(f_warn, user, "Multiple header chunks present");
+			found_header = true;
+			if (chk_size >= 2){
+				hd_format = ((int)data[chk.start + 0] << 8) | data[chk.start + 1];
+				if (hd_format != 0 && hd_format != 1 && hd_format != 2){
+					warn(f_warn, user, "Header reports bad format (%d)", hd_format);
+					hd_format = 1;
+				}
+			}
+			else{
+				warn(f_warn, user, "Header missing format");
+				hd_format = 1;
+			}
+			if (chk_size >= 4){
+				hd_tracks = ((int)data[chk.start + 2] << 8) | data[chk.start + 3];
+				if (hd_format == 0 && hd_tracks != 1){
 					warn(f_warn, user,
-						"Header chunk has non-standard size %d byte%s (expecting 6 bytes)",
-						orig_size, ss(orig_size));
+						"Format 0 expecting 1 track chunk, header is reporting %d chunks",
+						hd_tracks);
 				}
-				if (chk.data_size >= 2){
-					hd_format = ((int)data[chk.data_start + 0] << 8) | data[chk.data_start + 1];
-					if (hd_format != 0 && hd_format != 1 && hd_format != 2){
-						warn(f_warn, user, "Header reports bad format (%d)", hd_format);
-						hd_format = 1;
-					}
+			}
+			else{
+				warn(f_warn, user, "Header missing track chunk count");
+				hd_tracks = -1;
+			}
+			int division = 1;
+			if (chk_size >= 6){
+				division = ((int)data[chk.start + 4] << 8) | data[chk.start + 5];
+				if (division & 0x8000){
+					warn(f_warn, user, "Unsupported timing format (SMPTE)");
+					division = 1;
 				}
-				else{
-					warn(f_warn, user, "Header missing format");
-					hd_format = 1;
+			}
+			else
+				warn(f_warn, user, "Header missing division");
+			f_event((bm_delta_ev_st){
+				.delta = 0,
+				.ev = (bm_ev_st){
+					.type = BM_EV_RESET,
+					.u.reset = division
 				}
-				if (chk.data_size >= 4){
-					hd_track_ch = ((int)data[chk.data_start + 2] << 8) | data[chk.data_start + 3];
-					if (hd_format == 0 && hd_track_ch != 1){
-						warn(f_warn, user,
-							"Format 0 expecting 1 track chunk, header is reporting %d chunks",
-							hd_track_ch);
-					}
-				}
-				else{
-					warn(f_warn, user, "Header missing track chunk count");
-					hd_track_ch = -1;
-				}
-				int division = 1;
-				if (chk.data_size >= 6){
-					division = ((int)data[chk.data_start + 4] << 8) | data[chk.data_start + 5];
-					if (division & 0x8000){
-						warn(f_warn, user, "Unsupported timing format (SMPTE)");
-						division = 1;
-					}
-				}
-				else
-					warn(f_warn, user, "Header missing division");
-				f_event((bm_delta_ev_st){
-					.delta = 0,
-					.ev = (bm_ev_st){
-						.type = BM_EV_RESET,
-						.u.reset = division
-					}
-				}, user);
-			} break;
-
-			case 1: { // MTrk
-				if (hd_format == 0 && track_i > 0){
-					warn(f_warn, user, "Format 0 expecting 1 track chunk, found more than one");
-					hd_format = 1;
-				}
-				bm_deviceinit(&device);
-				int p = chk.data_start;
-				int p_end = chk.data_start + chk.data_size;
-				while (p < p_end){
-					// read delta as variable int
-					int dt = 0;
-					int len = 0;
-					while (true){
-						len++;
-						if (len >= 5){
-							warn(f_warn, user, "Invalid timestamp in track %d", track_i);
-							goto mtrk_end;
-						}
-						int t = data[p++];
-						if (t & 0x80){
-							if (p >= p_end){
-								warn(f_warn, user, "Invalid timestamp in track %d", track_i);
-								goto mtrk_end;
-							}
-							dt = (dt << 7) | (t & 0x7F);
-						}
-						else{
-							dt = (dt << 7) | t;
-							break;
-						}
-					}
-
-					if (p >= p_end)
-						warn(f_warn, user, "Missing message");
-					else{
-						// create an event with an invalid type, in order to detect if
-						// midi_single writes out an event
-						bm_delta_ev_st dev = { .delta = dt, .ev = { .type = 99 } };
-						p += midi_single(&data[p], p_end - p, &device, f_warn, user, &dev.ev);
-						if ((int)dev.ev.type != 99)
-							f_event(dev, user);
-					}
-				}
-				warn(f_warn, user, "Track %d ended before receiving End of Track message", track_i);
-				mtrk_end:
-				track_i++;
-			} break;
+			}, user);
 		}
+
+		// search for the MTrk that follow the MThd and initialize their devices
+		int track_count = 0;
+		{
+			while (ch + track_count < chunks_size && chunks[ch + track_count].type == 1){
+				bm_deviceinit(&chunks[ch + track_count].device);
+				track_count++;
+			}
+			if (hd_tracks >= 0 && track_count != hd_tracks){
+				warn(f_warn, user, "Mismatch between reported track count (%d) and actual track "
+					"count (%d)", hd_tracks, track_count);
+			}
+			if (hd_format == 0 && track_count > 1)
+				warn(f_warn, user, "Format 0 expecting 1 track chunk, found more than one");
+			if (hd_format == 2){
+				warn(f_warn, user, "MIDI Format 2 not supported by basicmidi; "
+					"accounts for less than 1%% of MIDI files");
+				ch += track_count;
+				continue;
+			}
+		}
+
+		// read every track's dt
+		int tracks_left = track_count;
+		for (int i = 0; i < track_count; i++){
+			if (!read_dt(&chunks[ch + i], data, i, f_warn, user)){
+				// failed to read dt, so disable track
+				chunks[ch + i].type = -1;
+				tracks_left--;
+			}
+		}
+
+		// loop around, grabbing the next event from all of the open tracks
+		while (tracks_left > 0){
+			// search for the lowest dt
+			int best_i = 0;
+			int best_dt = -1;
+			for (int i = 0; i < track_count; i++){
+				if (chunks[ch + i].type < 0) // skip chunks that have finished
+					continue;
+				if (best_dt < 0 || chunks[ch + i].dt < best_dt){
+					best_dt = chunks[ch + i].dt;
+					best_i = i;
+				}
+			}
+
+			// subtract the best_dt from every track
+			if (best_dt > 0){
+				for (int i = 0; i < track_count; i++){
+					if (chunks[ch + i].type < 0) // skip chunks that have finished
+						continue;
+					chunks[ch + i].dt -= best_dt;
+				}
+			}
+
+			// read the event from the track
+			int chk_size = chunks[ch + best_i].end - chunks[ch + best_i].start;
+			if (chk_size <= 0){
+				// track is empty, so disable it
+				warn(f_warn, user, "Missing message from track %d", best_i);
+				chunks[ch + best_i].type = -1;
+				tracks_left--;
+			}
+			else{
+				// create an event with an invalid type, in order to detect if midi_single writes
+				// out an event
+				bm_delta_ev_st dev = { .delta = best_dt, .ev = { .type = 99 } };
+				bool end_of_track = false;
+				int byte_size = midi_single(
+					&data[chunks[ch + best_i].start],
+					chk_size,
+					&chunks[ch + best_i].device,
+					f_warn, user, &dev.ev,
+					&end_of_track
+				);
+				if ((int)dev.ev.type != 99)
+					f_event(dev, user);
+
+				// advance this track
+				chunks[ch + best_i].start += byte_size;
+				chk_size -= byte_size;
+				if (end_of_track || chk_size <= 0){
+					// track finished, so disable it
+					chunks[ch + best_i].type = -1;
+					tracks_left--;
+				}
+				else{
+					// track hasn't finished, so read in the next dt for it
+					if (!read_dt(&chunks[ch + best_i], data, best_i, f_warn, user)){
+						// failed to read dt, so disable track
+						chunks[ch + best_i].type = -1;
+						tracks_left--;
+					}
+				}
+			}
+		}
+
+		// go to next grouping of chunks, which will start with a MThd (if it exists)
+		ch += track_count;
 	}
-	if (found_header && hd_track_ch != track_i){
-		warn(f_warn, user, "Mismatch between reported track count (%d) and actual track "
-			"count (%d)", hd_track_ch, track_i);
-	}
-	return;
 }
 
 void bm_writemidi(bm_delta_ev_st *events, int size, bm_dump_f f_dump, void *user){
