@@ -323,7 +323,7 @@ static inline void rest_init(bm_state_st *state){
 	for (int i = 0; i < 16; i++){
 		state->channels[i].vol = 16383;
 		state->channels[i].pan = 0;
-		state->channels[i].patch = i == 9 ? BM_PATCH_PERSND_STAN : 0;
+		state->channels[i].patch = i == 9 ? BM_PATCH_PERSND_STAN : BM_PATCH_PIANO_ACGR;
 		state->channels[i].bend = 0;
 		state->channels[i].mod = 0;
 		for (int p = 0; p < 6; p++)
@@ -446,8 +446,8 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			return data_size;
 		}
 		device->running_status = msg;
-		uint8_t note = data[p++];
-		uint8_t vel = data[p++];
+		int note = data[p++];
+		int vel = data[p++];
 		if (note >= 0x80){
 			warn(f_warn, user, "Bad Note-Off message (invalid note %02X)", note);
 			note ^= 0x80;
@@ -469,8 +469,8 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			return data_size;
 		}
 		device->running_status = msg;
-		uint8_t note = data[p++];
-		uint8_t vel = data[p++];
+		int note = data[p++];
+		int vel = data[p++];
 		if (note >= 0x80){
 			warn(f_warn, user, "Bad Note-On message (invalid note %02X)", note);
 			note ^= 0x80;
@@ -501,8 +501,8 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			return data_size;
 		}
 		device->running_status = msg;
-		uint8_t note = data[p++];
-		uint8_t pressure = data[p++];
+		int note = data[p++];
+		int pressure = data[p++];
 		if (note >= 0x80){
 			warn(f_warn, user, "Bad Note Pressure message (invalid note %02X)", note);
 			note ^= 0x80;
@@ -519,7 +519,7 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			return data_size;
 		}
 		device->running_status = msg;
-		uint8_t ctrl = data[p++];
+		int ctrl = data[p++];
 		int val = data[p++];
 		if (ctrl >= 0x80){
 			warn(f_warn, user, "Bad Control Change message (invalid control %02X)", ctrl);
@@ -572,16 +572,29 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 		}
 		int chan = msg & 0xF;
 		int bank = device->ctrls[chan].bank;
-		if ((bank & 0x110000) != 0x110000)
-			warn(f_warn, user, "Incomplete bank");
-
+		bool incomplete = (bank & 0x110000) != 0x110000;
+		bank &= 0xFFFF; // remove MSB/LSB flags
 		bool melody = (bank & 0xFF00) == 0x7900;
-		if ((bank & 0xFFFF) == 0){
-			warn(f_warn, user, "Empty bank; assuming GM1 melody");
-			melody = true;
-		}
 		bool percussion = (bank & 0xFF00) == 0x7800;
+
+		if (bank == 0){
+			if (chan == 9){
+				warn(f_warn, user, "%s bank; assuming GM percussion",
+					incomplete ? "Incomplete" : "Empty");
+				percussion = true;
+			}
+			else{
+				warn(f_warn, user, "%s bank; assuming GM melody",
+					incomplete ? "Incomplete" : "Empty");
+				melody = true;
+			}
+			incomplete = false; // already warned, don't warn twice
+		}
+
 		if (melody || percussion){
+			if (incomplete)
+				warn(f_warn, user, "Incomplete bank");
+
 			// calculate patch based on format of patch_midi
 			patch = (patch << 8) | (bank & 0xFF);
 			int start = melody ? 0 : 256;
@@ -596,10 +609,48 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 					return p;
 				}
 			}
-			warn(f_warn, user, "Unknown patch %02X for bank %04X", patch, bank);
+			patch >>= 8; // restore patch to old value
+
+			// unknown patch
+			if (percussion){
+				if (chan != 9){
+					// unknown percussion patch on melody channel, so use standard kit
+					*event_out = (bm_ev_st){
+						.type = BM_EV_PATCH,
+						.u.patch.channel = chan,
+						.u.patch.patch = BM_PATCH_PERSND_STAN
+					};
+					warn(f_warn, user, "Unknown percussion patch %02X for bank %04X; "
+						"defaulting to standard kit", patch, bank);
+				}
+				else{
+					// unknown percussion patch on percussion channel, so ignore
+					warn(f_warn, user, "Unknown percussion patch %02X for bank %04X; ignoring",
+						patch, bank);
+				}
+			}
+			else{
+				if (chan == 9){
+					// unknown melody patch on percussion channel, so use piano
+					*event_out = (bm_ev_st){
+						.type = BM_EV_PATCH,
+						.u.patch.channel = chan,
+						.u.patch.patch = BM_PATCH_PIANO_ACGR
+					};
+					warn(f_warn, user, "Unknown melody patch %02X for bank %04X; "
+						"defaulting to acoustic piano", patch, bank);
+				}
+				else{
+					// unknown melody patch on melody channel, so ignore
+					warn(f_warn, user, "Unknown melody patch %02X for bank %04X; ignoring",
+						patch, bank);
+				}
+			}
 		}
-		else
-			warn(f_warn, user, "Unknown bank %04X for patch %02X", bank, patch);
+		else{
+			warn(f_warn, user, "Unknown %sbank %04X for patch %02X",
+				incomplete ? "incomplete " : "", bank, patch);
+		}
 		return p;
 	}
 	else if (msg >= 0xD0 && msg < 0xE0){ // Channel Pressure
@@ -608,7 +659,7 @@ static int midi_single(const uint8_t *data, int data_size, bm_device_st *device,
 			return data_size;
 		}
 		device->running_status = msg;
-		uint8_t pressure = data[p++];
+		int pressure = data[p++];
 		if (pressure >= 0x80)
 			warn(f_warn, user, "Bad Channel Pressure message (invalid pressure %02X)", pressure);
 		return p;
